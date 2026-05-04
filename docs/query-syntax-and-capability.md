@@ -238,6 +238,45 @@ MySQL 中“子查询”不是单一能力，而是按照出现位置、返回�
 4. **是否影响权限过滤。** 权限字段不应通过子查询间接提供，仍需显式携带 `accountId`、`userId`、`envId`、`resourceZoneId`。
 5. **是否跨查询域或跨数据源。** 指标、实体、Nebula、日志、配置库之间的子查询组合应按跨源查询处理，明确超时、限流和错误码。
 
+### 2.5 表关联使用方式与场景矩阵
+
+表关联不能只用“支持 JOIN / 不支持 JOIN”描述。MySQL 中表关联既包括显式 `join ... on ...`，也包括逗号表列表、派生表关联、配置表关联、实体关系边关联等多种写法；Query 又叠加了查询域、权限条件、Nebula 远端调用和废弃全库联查等限制。建议把表关联能力按“关联对象 + 写法 + 场景”拆开维护。
+
+| 关联场景 | MySQL 标准写法或语义 | Query 当前使用方式 | Query 当前口径 | 必填条件 / 推荐写法 | 局限性与风险 |
+| --- | --- | --- | --- | --- | --- |
+| 单表无关联 | `from a` | 各查询域单表查询，如 `data.metrics`、`entity.host` | 支持子集 | 必须携带权限与时间范围 | 仍需限制扫描范围和返回规模 |
+| 显式内连接 | `from a join b on a.id = b.id` | 实体、配置、派生表等受控场景 | 有限制支持 | 必须有明确 `on` 条件；两侧查询域必须允许关联 | 不支持任意库表联查；需要按查询域声明 |
+| 隐式内连接 | `from a, b where a.id = b.id` | 可作为显式内连接的等价写法验证 | 有条件支持 | `where` 中必须存在明确关联条件 | 与无条件逗号表列表区分；不能自动放大为全库联查 |
+| 无条件逗号表列表 | `from a, b` | 不应使用 | 不支持 | 应拒绝或返回明确错误 | 属于笛卡尔 JOIN，结果规模和资源风险不可控 |
+| 显式 CROSS JOIN | `from a cross join b` | 不应使用 | 不支持 | 应拒绝或返回明确错误 | 与无条件逗号表列表一样属于笛卡尔积 |
+| LEFT JOIN | `from a left join b on ...` | 实体与配置表、实体与关系边子查询等 | 有限制支持 | 左表必须是受控查询域；右表需可精准过滤 | 需要控制右侧数据规模；权限条件原则上外层添加 |
+| RIGHT JOIN | `from a right join b on ...` | 手册未体现 | 未确认 / 不建议承诺 | 如有需求需单独验证 | 结果保留侧变化会影响权限和数据补齐语义 |
+| FULL JOIN | `from a full join b on ...` | 受限子查询组合效果类似 FULL JOIN | 不按标准语法承诺 | 只在各子查询分组维度一致时按组合查询处理 | 不代表支持任意标准 `FULL JOIN` 语法 |
+| 实体实例联查 | `entity.a join entity.b` | 实体实例查询支持多表关联 | 有限制支持 | 所有表必须有表别名；列必须使用 `表别名.列名` | `accountId`、`envId` 不支持在实例列中查询；高基数实体需强过滤 |
+| 实体与关系边联查 | 实体表 JOIN 关系边表 | `entity.*` 与 `entity.entity_relationship_edge` 联查 | 有限制支持 | 关系边查询建议放入子查询；必须提供 `go_from()` 等精准条件 | 涉及 Nebula 远端调用；默认 1w 条限制；避免全边扫描 |
+| 关系边直接联查 | 直接 JOIN Nebula 边表 | 不推荐 | 受限 / 高风险 | 应优先改写为关系边子查询再 JOIN 实体表 | ClickHouse 不会下推 Nebula 查询条件时会放大远端扫描 |
+| 实体与配置库联查 | `entity left join br_one` | `entity."service" t1 left join br_one.t_apm_agent_config t2 on ...` | 有限制支持 | 当前主要支持 `br_one` 与 `entity`；配置表需注册关联主键 | 配置表需 meta 维护；多关联列能力有限 |
+| 指标与配置关键字关联 | 标准 SQL 通常用 JOIN | Query 使用 `config.tableName[...]` 关键字 | 支持特有写法 | `config.t_apm_agent_config[serviceId].instance_id` | 不是标准 JOIN 语法；关联列多个时限制更多 |
+| 指标与实体属性关联 | 标准 SQL 通常 JOIN 维表 | Query 使用 `entity.modelKey[...]` 关键字 | 支持特有写法 | `entity.app.appName`、`entity.page[pageId].pageName` | 多维度指向同一实体时必须显式指定维度 ID |
+| 指标与标签关联 | 标准 SQL 通常 JOIN 标签表 | Query 使用 `tags.*` 关键字 | 支持子集 | `tags.tag`、`tags.tags`、`tags.appId` | 指标无关联实体时使用标签关键字会报错；标签展开需限制规模 |
+| 多指标同维度关联 | 标准 SQL 可 JOIN 多个聚合结果 | Query 可直接多列查询 | 支持 | 所有指标维度必须一致，即 `dimensionId + dataType` 一致 | 维度不一致时应报错或改写为受限子查询 |
+| 多指标异维度关联 | 标准 SQL 可通过子查询 JOIN | Query 使用受限派生表组合 | 有限制支持 | 各子查询分组维度必须一致；明确 JOIN 条件 | 子查询数量、层数、中间结果规模需要限制 |
+| 记录与实体关联 | 标准 SQL JOIN 记录表与实体表 | `data.records` 中使用实体关键字 | 支持子集 | `recordKey` 必填；通用权限与时间条件必填 | 支持 `union all` / `union distinct` 的场景需单独测试 |
+| 事件与关联实体 | 标准 SQL JOIN 事件表和实体表 | `relatedEntity.${modelKey}`、`brEventRelationEntityKey` | 有限制支持 | `data.\`event\`` 必须反引号；权限与时间必填 | `brEventRelationEntityKey` 只支持 `select`、`group by`、`having`，不能用于 `where` |
+| 日志与实体属性关联 | 标准 SQL JOIN 日志与实体表 | `data.logdetails` 中使用 `relationEntity.*`、`entity.*` | 有限制支持 | `indexId`、`monitorTimeMs`、权限字段必填 | 日志查询不支持 JOIN、子查询、取样、第三方日志 |
+| 日志 live tail 与实体属性关联 | 标准 SQL JOIN 实时日志与实体表 | `data.loglive` 中使用关联实体字段 | 有限制支持 | 时间范围和权限字段必填 | 需限制返回条数；字段名依赖日志属性元数据 |
+| 跨 schema 关联 | `db1.a join db2.b` | `data`、`entity`、`br_one`、`meta` 等按场景开放 | 有限制支持 | 必须落在明确开放的查询域组合内 | 全库联查已废弃；`br_one`/`meta` 全表联查不应承诺 |
+| 第三方数据源关联 | 联邦查询 / 外部表 JOIN | 当前主要体现为 Nebula；ELK、日志易规划中 | 当前仅有限支持 | 需按数据源声明能力、权限、限流、错误码 | 跨源延迟和资源不可控，不能默认承诺 |
+
+表关联需求准入时建议至少确认：
+
+1. **关联对象是什么。** 是指标-实体、实体-实体、实体-配置、实体-Nebula 边、日志-实体，还是跨第三方数据源。
+2. **关联写法是什么。** 显式 `join ... on ...`、隐式 `from a, b where ...`、Query 关键字关联、派生表 JOIN、还是配置关键字。
+3. **关联条件是否明确。** 无关联条件、非等值宽泛条件、无法命中 Nebula 精准条件的需求应拒绝或要求改写。
+4. **权限条件放在哪里。** `accountId`、`userId`、`envId`、`resourceZoneId` 原则上外层显式携带，且禁止表别名。
+5. **是否会放大结果集。** 关注标签展开、多指标异维度、关系边查询、日志聚合和跨源查询。
+6. **是否已有废弃能力依赖。** 全库联查、`br_one`/`meta` 全表联查、旧 `entity` 注册关系联查不应继续默认开放。
+
 ## 3. PQL 查询能力
 
 ### 3.1 支持接口
@@ -768,6 +807,10 @@ frm(metricId [,cycle])
 - 显式 `join ... on ...` 和隐式 `from a, b where ...` 应作为两个独立 JOIN 写法测试。
 - `from a, b` 无关联条件时应按笛卡尔 JOIN 拒绝，不应误判为普通 INNER JOIN。
 - JOIN 必须携带明确关联条件，Nebula 关系查询还需强过滤条件。
+- 实体实例查询表别名、列名前缀、`accountId/envId` 不作为实例列返回等限制应单独测试。
+- `entity` 与 `br_one` 配置表 left join、`config.xxx[...]` 关键字关联、实体与 Nebula 边表子查询关联应分别测试。
+- Nebula 关系边直接 join 与先子查询再 join 应分别测试，直接 join 应引导改写或限制。
+- 跨数据源关联、日志 join、事件 join、未注册配置表关联应返回明确不支持或准入失败提示。
 - RIGHT JOIN、标准 FULL JOIN、任意跨库跨源 JOIN 不应被误判为已支持。
 - `group by` 列名、别名、表达式、列序号应分别测试并标注支持状态。
 - `order by` 列名、别名、表达式、列序号应分别测试并标注支持状态。
