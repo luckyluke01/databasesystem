@@ -396,30 +396,8 @@
 
 ## 6. 事务与一致性能力
 
-### 6.1 事务语法
 
-- BEGIN
-- START TRANSACTION
-- COMMIT
-- ROLLBACK
-- SAVEPOINT
-- ROLLBACK TO SAVEPOINT
-- SET autocommit
-- 隐式提交
-- DDL 是否隐式提交
-
-### 6.2 隔离级别
-
-- READ UNCOMMITTED
-- READ COMMITTED
-- REPEATABLE READ
-- SERIALIZABLE
-- 默认隔离级别
-- 是否支持 MVCC
-- 是否支持快照读
-- 是否支持当前读
-
-### 6.3 一致性模型
+### 6.1 一致性模型
 
 - 强一致
 - 最终一致
@@ -432,19 +410,6 @@
 - 幂等写入
 - 冲突检测
 
-### 6.4 锁能力
-
-- 行锁
-- 表锁
-- 元数据锁
-- 间隙锁
-- 意向锁
-- 悲观锁
-- 乐观锁
-- 死锁检测
-- 锁等待超时
-- `SELECT FOR UPDATE`
-- `SELECT LOCK IN SHARE MODE`
 
 ## 7. 存储与表能力
 
@@ -463,18 +428,7 @@
 - 明细表
 - 聚合表
 
-### 7.2 主键与约束
 
-- PRIMARY KEY
-- UNIQUE KEY
-- FOREIGN KEY
-- NOT NULL
-- DEFAULT
-- CHECK
-- AUTO_INCREMENT
-- 复合主键
-- 唯一约束
-- 外键约束实际执行情况
 
 ### 7.3 分区能力
 
@@ -826,18 +780,7 @@
 - 密码轮换
 - 登录失败锁定
 
-### 14.2 授权
 
-- 用户权限
-- 角色权限
-- 库级权限
-- 表级权限
-- 列级权限
-- 行级权限
-- 视图权限
-- 函数权限
-- 管理权限
-- 最小权限原则
 
 ### 14.3 数据安全
 
