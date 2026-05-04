@@ -54,6 +54,7 @@
 | ORDER BY | 原始列、别名、表达式、聚合结果排序 | 支持子集 | 日志、事件、模型查询中按字段或聚合结果排序 | 需与查询域能力联动确认；大排序应纳入资源限制 |
 | LIMIT | 限制返回行数、分页 | 支持 | `limit 10`、`limit 100` | 应声明默认上限和最大上限；日志、关系查询、大结果集必须限制返回规模 |
 | INNER JOIN | 任意表内连接 | 有限制支持 | 受限子查询 JOIN、部分实体/配置联查 | 不支持任意库表联查；JOIN 两侧需要满足 Query 查询域规则 |
+| 逗号表列表 JOIN 写法 | `from a, b where a.id = b.id` 通常等价于 INNER JOIN | 有限制支持 | 可作为 INNER JOIN 的等价写法单独验证 | 必须在 `where` 中提供明确关联条件；没有关联条件时会退化为笛卡尔 JOIN，当前不支持 |
 | LEFT JOIN | 左连接 | 有限制支持 | `entity` 与 `br_one` 配置表联查；实体与关系边子查询联查 | 与 Nebula 关系边联查时，关系边建议先放入子查询；权限条件只在外层添加 |
 | RIGHT JOIN | 右连接 | 未在手册中体现 | 不建议对外承诺 | 如业务需要需单独验证解析、执行和结果语义 |
 | FULL JOIN | 全连接 | 不直接按标准 SQL 承诺 | 受限子查询组合的效果类似 FULL JOIN | 仅在各子查询分组维度一致的场景下支持组合查询；不代表支持任意 `FULL JOIN` 语法 |
@@ -66,6 +67,26 @@
 | 窗口函数 | `over(partition by ... order by ...)` 标准窗口语法 | 以 Query 特有方式支持 | 聚合函数增加 `cycle` 参数 | 不支持标准 SQL `over` 语法；多个窗口列要求窗口大小一致 |
 | 列别名 | SELECT 别名可在部分子句引用 | 支持子集 | SELECT 中可设置别名 | `where` 不支持列别名过滤；同一指标同时查开窗和不开窗时必须指定别名 |
 | 关键字转义 | 反引号、双引号、保留字处理 | 部分需要 | 事件表使用 `data.\`event\`` | 关键字表名必须转义；字段和库表命名规范需继续固化 |
+
+### 2.2 等价语义的不同写法也要单独声明
+
+标准数据库中，同一个查询语义经常存在多种 SQL 写法。Query 能力说明和测试矩阵不能只写“支持某能力”，还应列出该能力支持哪些写法、哪些写法不支持、哪些写法虽然语义相近但会触发不同执行路径。
+
+以 INNER JOIN 为例，至少应拆分为以下场景：
+
+| 场景 | 示例 | Query 口径 |
+| --- | --- | --- |
+| 显式 INNER JOIN | `from a join b on a.id = b.id` | 作为 JOIN 能力单独验证，要求明确 `on` 条件 |
+| 隐式 INNER JOIN | `from a, b where a.id = b.id` | 可作为 INNER JOIN 的等价写法单独验证，要求 `where` 中存在明确关联条件 |
+| 无关联条件逗号写法 | `from a, b` | 属于笛卡尔 JOIN / CROSS JOIN，当前不支持 |
+| 显式 CROSS JOIN | `from a cross join b` | 当前不支持 |
+
+同样的拆分原则也适用于：
+
+- 聚合过滤：`having count(*) > 0` 与 `where status = 'error'` 不是同类过滤，Query 不支持用 `having` 过滤非聚合列。
+- 子查询：派生表 JOIN、标量子查询、相关子查询、`exists` 不应合并成一个“支持子查询”口径。
+- UNION：新老表兼容的 `union all`、记录查询的 `union distinct`、普通业务 SQL 的集合运算应分别声明。
+- 时间聚合：`toStartOfInterval(monitorTime, INTERVAL 1 HOUR)` 与普通时间字段分组应分别测试。
 
 ## 3. PQL 查询能力
 
@@ -647,6 +668,8 @@ frm(metricId [,cycle])
 - `where` 禁止列别名过滤。
 - `having` 禁止非聚合列过滤，非聚合字段过滤应下推到 `where`。
 - 笛卡尔 JOIN / CROSS JOIN 应拒绝或返回明确不支持错误。
+- 显式 `join ... on ...` 和隐式 `from a, b where ...` 应作为两个独立 JOIN 写法测试。
+- `from a, b` 无关联条件时应按笛卡尔 JOIN 拒绝，不应误判为普通 INNER JOIN。
 - JOIN 必须携带明确关联条件，Nebula 关系查询还需强过滤条件。
 - RIGHT JOIN、标准 FULL JOIN、任意跨库跨源 JOIN 不应被误判为已支持。
 - 指标、记录、会话、事件、日志、实体、配置库各查询域样例 SQL。
