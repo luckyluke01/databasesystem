@@ -614,7 +614,7 @@ where accountId = 5
 - 当前实体实例联查主要支持 `br_one` 和 `entity`。
 - 历史全库联查能力已废弃，不应默认承诺。
 
-## 6. 受限子查询能力
+## 6. 受限子查询能力与 MySQL 子查询场景矩阵
 
 当前子查询能力应按“受限支持”对外说明。
 
@@ -666,6 +666,44 @@ join (
 - 应限制子查询数量、层数、中间结果规模和扫描范围。
 - 子查询中的分组维度必须一致。
 - 权限条件仍应放在最外层或按 Query 规则校验，避免重复加权限条件导致语义错误。
+
+### 6.1 MySQL 子查询能力细分矩阵
+
+MySQL 中“子查询”不是单一能力，而是按照出现位置、返回形态和是否引用外层字段分成多类。Query 目前手册只明确了受限派生表组合查询，因此其他子查询形态应先按“未确认 / 不建议承诺”管理，避免业务误以为完整支持。
+
+| 一级位置 | 二级分类 | 写法能力点 | MySQL 标准含义 | Query 当前口径 | 示例 | 限制或补齐方向 |
+| --- | --- | --- | --- | --- | --- | --- |
+| SELECT | 标量子查询 | `select (select count(*)) as c` | 子查询返回单行单列作为一个值 | 未确认 / 不建议承诺 | `select (select count(*) from t2) as c from t1` | 未在手册中体现；需验证解析、执行次数和资源消耗 |
+| SELECT | 相关标量子查询 | `select (select ... where b.id=a.id)` | 子查询引用外层行，每行计算一次 | 不建议承诺 | `select a.id, (select max(x) from b where b.id=a.id) from a` | 高资源风险，容易退化为逐行远端调用 |
+| SELECT | 子查询表达式参与计算 | `(select v) + col` | 子查询结果参与表达式计算 | 未确认 / 不建议承诺 | `select value / (select total from t2) from t1` | 应优先改写为受控 JOIN 或预聚合结果 |
+| FROM | 派生表 | `from (select ...) a` | 子查询结果作为临时表 | 受限支持 | `from (...) a join (...) b` | 当前支持重点；要求子查询分组维度一致 |
+| FROM | 多派生表 JOIN | `from (subq1) a join (subq2) b` | 多个子查询结果关联 | 受限支持 | 多指标时间段对比查询 | 子查询数量、中间结果规模、扫描时间范围需要限制 |
+| FROM | 派生表嵌套派生表 | `from (select ... from (select ...)) a` | 多层嵌套 | 不支持 / 不建议承诺 | `from (select * from (select * from t) x) a` | 当前“不支持任意嵌套 SQL”，应拒绝或限制层数为 1 |
+| FROM | 派生表无别名 | `from (select ...)` | MySQL 要求派生表有别名 | 不支持 / 应拒绝 | `from (select ... )` | 应返回清晰语法错误，引导补充别名 |
+| WHERE | `IN` 子查询 | `where col in (select col from ...)` | 使用多行单列结果过滤 | 未确认 / 不建议承诺 | `where appId in (select appId from ...)` | 当前手册只体现常量 `in (...)`；子查询版需单独验证 |
+| WHERE | `NOT IN` 子查询 | `where col not in (select col from ...)` | 排除子查询结果 | 未确认 / 不建议承诺 | `where appId not in (select appId from ...)` | 需明确 NULL 语义和大结果集限制 |
+| WHERE | `EXISTS` 子查询 | `where exists (select 1 ...)` | 判断子查询是否存在结果 | 未确认 / 不建议承诺 | `where exists (select 1 from b where b.id=a.id)` | 通常依赖相关子查询，资源风险高 |
+| WHERE | `NOT EXISTS` 子查询 | `where not exists (...)` | 反半连接语义 | 未确认 / 不建议承诺 | `where not exists (...)` | 需明确反连接语义、NULL 和性能边界 |
+| WHERE | 比较子查询 | `where col > (select max(...))` | 与单值子查询结果比较 | 未确认 / 不建议承诺 | `where value > (select avg(value) from t)` | 需要保证子查询单行单列，否则错误语义需定义 |
+| WHERE | `ANY` / `SOME` / `ALL` | `where col > all (select ...)` | 与子查询集合做量词比较 | 未确认 / 不建议承诺 | `where latency > all (select latency from t2)` | MySQL 支持但手册未体现，建议默认不承诺 |
+| WHERE | 相关子查询 | 子查询引用外层表字段 | 外层每行驱动子查询 | 不建议承诺 | `where exists (select 1 from b where b.id=a.id)` | 对 Nebula、日志、跨源查询风险极高，应优先改写 |
+| WHERE | 子查询在权限过滤中 | 权限字段来自子查询 | 动态权限集合过滤 | 不支持 / 不建议承诺 | `where accountId in (select ...)` | 权限条件必须显式携带且禁止表别名，不应通过子查询绕过 |
+| JOIN | 派生表 JOIN | `join (select ...) b on ...` | 子查询结果参与 JOIN | 受限支持 | `a join (select ... group by ...) b on ...` | 要求分组维度一致、明确关联条件 |
+| JOIN | 子查询放在 ON 条件中 | `on a.id in (select ...)` | ON 内使用子查询过滤关联 | 未确认 / 不建议承诺 | `on a.id in (select id from b)` | ON 条件当前应保持明确关联条件，避免隐藏扫描 |
+| HAVING | 聚合子查询 | `having sum(x) > (select ...)` | 聚合结果与子查询比较 | 未确认 / 不建议承诺 | `having num > (select avg(num) from ...)` | 当前 HAVING 仅建议用于聚合结果/别名过滤 |
+| ORDER BY | 排序子查询 | `order by (select ...)` | 按子查询结果排序 | 未确认 / 不建议承诺 | `order by (select weight from ...)` | 高资源风险，手册未体现 |
+| UNION | 子查询内部 UNION | `from (select ... union all select ...) a` | 子查询结果由集合运算产生 | 场景化支持 / 需确认 | 新老表 `union all` 兼容 | 仅在迁移兼容、记录查询等场景承诺；类型和函数中间态需校验 |
+| DML | DML 子查询 | `insert into ... select ...`、`update ... where in (select ...)` | 写入或更新中使用子查询 | 不支持 | - | Query 不支持 DDL/DML 写入能力 |
+
+### 6.2 子查询准入原则
+
+对子查询需求，建议在需求评审时按以下顺序判断：
+
+1. **是否能改写为当前已支持的派生表组合查询。** 如果能，应要求各子查询分组维度一致，并限制时间范围和中间结果规模。
+2. **是否涉及相关子查询。** 如果子查询引用外层字段，应默认判定为高风险，不进入默认支持范围。
+3. **是否出现在 `where` / `having` / `on` 中。** 这些位置的子查询容易隐藏扫描或改变过滤下推，应单独测试并声明错误行为。
+4. **是否影响权限过滤。** 权限字段不应通过子查询间接提供，仍需显式携带 `accountId`、`userId`、`envId`、`resourceZoneId`。
+5. **是否跨查询域或跨数据源。** 指标、实体、Nebula、日志、配置库之间的子查询组合应按跨源查询处理，明确超时、限流和错误码。
 
 ## 7. 开窗聚合能力
 
@@ -743,6 +781,9 @@ frm(metricId [,cycle])
 - 指标、记录、会话、事件、日志、实体、配置库各查询域样例 SQL。
 - 多指标维度一致和不一致场景。
 - 受限子查询分组维度一致校验。
+- FROM 派生表子查询作为当前主要支持子查询形态单独测试。
+- SELECT 标量子查询、WHERE IN 子查询、WHERE EXISTS 子查询、相关子查询、HAVING 子查询等未确认能力应返回明确不支持或不承诺口径。
+- 子查询层数、数量、中间结果规模和每个子查询扫描范围应纳入资源边界测试。
 - 开窗聚合 `cycle` 参数校验。
 - 高基数实体必填条件。
 - Nebula `go_from()` 精准条件和 1w 限制。
