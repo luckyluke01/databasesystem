@@ -88,6 +88,69 @@
 - UNION：新老表兼容的 `union all`、记录查询的 `union distinct`、普通业务 SQL 的集合运算应分别声明。
 - 时间聚合：`toStartOfInterval(monitorTime, INTERVAL 1 HOUR)` 与普通时间字段分组应分别测试。
 
+### 2.3 MySQL 语法结构细分能力矩阵
+
+为便于快速发现“不支持但标准数据库常见”的能力缺口，建议能力矩阵按 MySQL 查询语法结构继续拆分。下表中的“Query 当前口径”应作为需求准入、测试用例设计和后续补齐排期的起点；未在手册中明确出现的能力，先按“未确认 / 不建议承诺”管理。
+
+| 一级语法位置 | 二级分类 | 写法能力点 | MySQL 标准含义 | Query 当前口径 | 示例 | 限制或补齐方向 |
+| --- | --- | --- | --- | --- | --- | --- |
+| SELECT | 普通字段投影 | 按列名查询 | 返回指定字段 | 支持子集 | `select appId from data.metrics` | 字段必须属于当前查询域；实体实例查询列需带表别名 |
+| SELECT | 表别名字段 | `表别名.列名` | 消除多表字段歧义 | 实体实例查询要求支持 | `select a.instanceId from entity.host a` | 实体实例数据查询所有列必须使用表别名 |
+| SELECT | 通配符 | `*`、`a.*` | 返回全部字段或指定表字段 | 有限制支持 / 需确认 | `select a.* from entity.app a` | 大结果集风险高，需限制查询域和返回规模 |
+| SELECT | 表达式 | 算术、字符串、函数表达式 | 计算派生列 | 支持子集 | `maxMonitorTime - minMonitorTime as duration` | 支持范围依赖底层函数和查询域 |
+| SELECT | 列别名 | `expr as alias` | 给输出列命名 | 支持 | `count(*) as num` | `where` 不支持引用列别名；开窗与非开窗同指标同时查询必须指定别名 |
+| SELECT | 聚合函数 | 标准聚合 | 聚合多行数据 | 支持业务函数子集 | `sum(metricId)`、`avg(metricId)` | 受指标模型、粒度表、维度一致性和函数演进影响 |
+| SELECT | 业务聚合函数 | 平台自定义聚合 | 指标模型专用计算 | 支持 | `frm(metricId)`、`uniqTheta(metricId)` | 函数变更需声明兼容策略，如 `uniqTheta` 到 `uniqHLL12` |
+| SELECT | 窗口类聚合 | 标准 MySQL 使用 `over(...)` | 窗口范围内计算 | Query 特有写法支持 | `sum(metricId, 1)` | 不支持标准 `over` 语法；使用 `cycle` 参数且需时间对齐 |
+| FROM | 单表查询 | `from db.table` | 从单表读取 | 支持子集 | `from data.metrics` | 表必须属于开放查询域 |
+| FROM | schema/table 命名 | `database.table` | 跨 schema 指定对象 | 支持业务库表 | `data.metrics`、`entity.host` | 不是任意库表开放；全库联查已废弃 |
+| FROM | 关键字表名 | 反引号转义 | 查询保留字对象 | 支持需要转义的场景 | `from data.\`event\`` | `event` 是关键字，必须转义 |
+| FROM | 表别名 | `from table a` | 后续用别名引用表 | 实体实例查询要求支持 | `from entity.host a` | 实体实例、关系联查必须使用表别名 |
+| FROM | 派生表 | `from (select ...) a` | 子查询结果作为表 | 受限支持 | `from (...) a join (...) b` | 各子查询分组维度必须一致；限制层数、数量和中间结果规模 |
+| FROM | 逗号表列表 | `from a, b` | 标准上可形成笛卡尔积，配合 `where` 可等价内连接 | 有条件支持 | `from a, b where a.id = b.id` | 必须有明确关联条件；无条件逗号表列表不支持 |
+| JOIN | 显式 INNER JOIN | `join ... on ...` | 内连接 | 有限制支持 | `from a join b on a.id = b.id` | 不支持任意库表联查；必须满足查询域规则 |
+| JOIN | 隐式 INNER JOIN | `from a, b where a.id = b.id` | 等价内连接写法 | 有限制支持 | `from a, b where a.id = b.id` | 与显式 JOIN 分开测试；必须有明确关联条件 |
+| JOIN | LEFT JOIN | `left join ... on ...` | 保留左表记录 | 有限制支持 | `entity` left join `br_one` | Nebula 关系边建议放入子查询；权限条件只在外层添加 |
+| JOIN | RIGHT JOIN | `right join ... on ...` | 保留右表记录 | 未确认 / 不建议承诺 | `a right join b on ...` | 需单独验证解析、执行和结果语义 |
+| JOIN | FULL JOIN | `full join ...` | 保留两侧记录 | 不按标准语法承诺 | 受限子查询组合效果类似 FULL JOIN | 不代表支持任意标准 `FULL JOIN` |
+| JOIN | CROSS JOIN | `cross join` | 笛卡尔积 | 不支持 | `from a cross join b` | 应拒绝或返回明确错误，避免结果爆炸 |
+| JOIN | 无条件逗号 JOIN | `from a, b` | 笛卡尔积 | 不支持 | `from a, b` | 与隐式 INNER JOIN 区分；无关联条件必须拒绝 |
+| JOIN | ON 等值条件 | `on a.id = b.id` | 等值关联 | 支持子集 | `on t2.instance_id = t1.instanceId` | 关系查询需精准条件 |
+| JOIN | ON 多条件 | `on a.id=b.id and ...` | 多条件关联 | 支持子集 | `on a.instanceId = ... and b.xxx = ...` | 需确认表达式、函数、非等值条件支持范围 |
+| JOIN | USING / NATURAL | `using(col)`、`natural join` | 简化或自动关联 | 未确认 / 不建议承诺 | `join b using(id)` | 未在手册中体现，建议默认不承诺 |
+| WHERE | 比较过滤 | `=`, `!=`, `>`, `<`, `>=`, `<=` | 行级过滤 | 支持子集 | `serviceId > 0` | 字段必须属于当前查询域 |
+| WHERE | 集合过滤 | `in`, `not in` | 多值过滤 | 支持子集 | `appId in (1429)` | 大集合需限制参数数量 |
+| WHERE | 模糊过滤 | `like` | 字符串匹配 | 支持子集 | `detectedName like ...` | 模糊查询需评估索引和扫描风险 |
+| WHERE | NULL 判断 | `is null`, `is not null` | 空值过滤 | 支持子集 | `tags.appId is null` | 标签字段和普通字段需分别测试 |
+| WHERE | 列别名过滤 | 在 `where` 中引用 select 别名 | MySQL 通常不允许，部分系统扩展支持 | 不支持 | `where avgValue > 0` | 使用原始列名或把过滤放到聚合后的 `having` |
+| WHERE | 权限过滤 | 账号、用户、环境、资源域 | 业务权限约束 | 必填 | `accountId=5 and userId=5 and envId='default'` | 禁止加表别名；原则上放在最外层 |
+| WHERE | 时间范围 | 明细或粒度表时间条件 | 控制扫描范围 | 必填 | `monitorTime >= ... and monitorTime < ...` | 不同查询域使用 `monitorTime`、`monitorTimeMs`、`receiveTimeMs` |
+| WHERE | 实体关键字过滤 | `entity.modelKey[...]` | 实体关联过滤 | 支持子集 | `entity.app.appType = 1` | 多维度指向同一实体时需显式指定维度 ID |
+| WHERE | 标签过滤 | `tags.*` | 数据标签或实例标签过滤 | 支持子集 | `tags.appId is null` | 无关联实体时使用标签关键字会报错 |
+| WHERE | 子查询过滤 | `exists`、`in (select ...)` | 以子查询结果过滤 | 未确认 / 不建议承诺 | `where exists (...)` | 当前受限子查询主要是派生表组合，不应泛化承诺 |
+| GROUP BY | 原始列分组 | `group by col` | 按字段聚合 | 支持子集 | `group by appId` | 字段需属于查询域和指标维度 |
+| GROUP BY | 多列分组 | `group by col1, col2` | 组合维度聚合 | 支持子集 | `group by appVersion, monitorTime` | 多指标要求维度一致 |
+| GROUP BY | 表达式分组 | `group by expression` | 按表达式结果分组 | 支持子集 | `group by toStartOfInterval(...)` | 开窗查询要求时间对齐表达式 |
+| GROUP BY | 别名分组 | `select expr as x ... group by x` | MySQL 支持按别名分组 | 未确认 / 需单独测试 | `group by monitorTime` | 若别名与原字段同名需确认解析语义 |
+| GROUP BY | 列序号分组 | `group by 1` | 按 select 第 1 列分组 | 未确认 / 需单独测试 | `select appId, count(*) ... group by 1` | 用户点名的重点补齐项，建议加入回归矩阵 |
+| GROUP BY | 实体关键字分组 | `group by entity.xxx` | 按关联实体属性分组 | 支持子集 | `group by entity.app.appName` | 维度歧义时必须指定维度 ID |
+| GROUP BY | 标签分组 | `group by tags.xxx` | 按标签聚合 | 支持子集 | `group by entityTag, DataTag` | 标签返回 map 结构，需限制展开规模 |
+| HAVING | 聚合表达式过滤 | `having count(*) > 0` | 聚合后过滤 | 支持子集 | `having num > 0` | 应限制为聚合结果或聚合别名 |
+| HAVING | 聚合别名过滤 | `having alias > 0` | 使用 select 聚合别名过滤 | 支持子集 / 需确认 | `having num > 0` | 示例体现该用法，需补充正式测试 |
+| HAVING | 非聚合列过滤 | `having status = 'x'` | 标准 MySQL 可能允许特定模式下使用 | 不支持 | `having appId = 1` | 非聚合字段过滤应下推到 `where` |
+| ORDER BY | 原始列排序 | `order by col` | 按字段排序 | 支持子集 | `order by eventLevel` | 大排序需资源限制 |
+| ORDER BY | 别名排序 | `order by alias` | 按输出别名排序 | 支持子集 / 需确认 | `order by hostId desc` | 示例体现该用法，需形成测试项 |
+| ORDER BY | 列序号排序 | `order by 1` | 按 select 第 1 列排序 | 未确认 / 需单独测试 | `order by 1 desc` | 标准 MySQL 常见能力，建议补充支持状态 |
+| ORDER BY | 表达式排序 | `order by expression` | 按表达式排序 | 未确认 / 不建议承诺 | `order by count(*) desc` | 需结合聚合和资源限制验证 |
+| LIMIT | 限制条数 | `limit n` | 返回前 n 行 | 支持 | `limit 10` | 应声明默认上限和最大上限 |
+| LIMIT | 偏移分页 | `limit offset, n`、`limit n offset offset` | 分页 | 未确认 / 需单独测试 | `limit 10 offset 20` | MySQL 两种写法应分别列为能力点 |
+| UNION | `union all` | 不去重合并 | 场景化支持 | 新老表兼容、记录查询 | 类型对齐和中间态函数需校验 |
+| UNION | `union distinct` | 去重合并 | 场景化支持 | 记录查询 | 去重成本和字段类型需限制 |
+| 子查询 | 派生表 JOIN | `from (select ...) a join ...` | 子查询作为表 | 受限支持 | 多指标组合查询 | 要求各子查询分组维度一致 |
+| 子查询 | 标量子查询 | `select (select ...)` | 单值子查询 | 未确认 / 不建议承诺 | `select (select count(*))` | 未在手册中体现 |
+| 子查询 | 相关子查询 | 子查询引用外层列 | 行相关执行 | 未确认 / 不建议承诺 | `where exists (...)` | 高资源风险，不应默认承诺 |
+| 注释 | SQL 头部 JSON 注释 | 注释通常被数据库忽略 | Query 扩展支持 | `/**{"one-traceId":"..."}*/ select ...` | 仅支持约定字段；格式错误行为需声明 |
+
 ## 3. PQL 查询能力
 
 ### 3.1 支持接口
@@ -672,6 +735,11 @@ frm(metricId [,cycle])
 - `from a, b` 无关联条件时应按笛卡尔 JOIN 拒绝，不应误判为普通 INNER JOIN。
 - JOIN 必须携带明确关联条件，Nebula 关系查询还需强过滤条件。
 - RIGHT JOIN、标准 FULL JOIN、任意跨库跨源 JOIN 不应被误判为已支持。
+- `group by` 列名、别名、表达式、列序号应分别测试并标注支持状态。
+- `order by` 列名、别名、表达式、列序号应分别测试并标注支持状态。
+- `where`、`on`、`having` 中表达相近过滤语义的写法应分别测试，不能只按最终结果相似判断支持。
+- `limit n`、`limit offset, n`、`limit n offset offset` 应分别测试并标注分页支持状态。
+- `in` 列表、`in (subquery)`、`exists`、标量子查询应分别测试并标注支持状态。
 - 指标、记录、会话、事件、日志、实体、配置库各查询域样例 SQL。
 - 多指标维度一致和不一致场景。
 - 受限子查询分组维度一致校验。
